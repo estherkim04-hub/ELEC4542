@@ -28,6 +28,12 @@ import sys
 import numpy as np
 from PIL import Image, ImageOps
 
+try:  # read iPhone .HEIC photos if pillow-heif is installed
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    pass
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from dvid.contracts import H, W  # noqa: E402
 
