@@ -1,0 +1,8 @@
+numpy>=1.26
+pytest>=8
+# Add as each module becomes real:
+# torch, torchvision          (both)
+# opencv-python               (Member 1: SIFT, I/O)
+# depth-anything-3            (Member 1)
+# diffusers, transformers     (Member 2)
+# lpips, scikit-image         (Member 2: metrics)
