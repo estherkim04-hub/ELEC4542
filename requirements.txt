@@ -1,8 +1,10 @@
 numpy>=1.26
 pytest>=8
-# Add as each module becomes real:
-# torch, torchvision          (both)
-# opencv-python               (Member 1: SIFT, I/O)
-# depth-anything-3            (Member 1)
+pillow>=10
+opencv-python>=4.8      # SIFT, video reading
+scikit-image>=0.22      # SSIM in pilot / metrics
+yt-dlp                  # RealEstate10K video download
+# Colab / GPU only:
+# torch, depth-anything-3     (Member 1: scripts/run_da3.py)
 # diffusers, transformers     (Member 2)
-# lpips, scikit-image         (Member 2: metrics)
+# lpips                       (Member 2: metrics)
