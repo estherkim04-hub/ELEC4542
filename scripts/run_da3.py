@@ -45,7 +45,7 @@ MODEL_IDS = {
 
 def load_working_rgb(path):
     """Centre-crop to W:H aspect ratio, resize to (W, H). Returns uint8 RGB."""
-    img = ImageOps.exif_transpose(Image.open(path)).convert("RGB") 
+    img = ImageOps.exif_transpose(Image.open(path)).convert("RGB")  # apply phone rotation tag
     w0, h0 = img.size
     target = W / H
     if w0 / h0 > target:  # too wide -> crop width
@@ -56,13 +56,13 @@ def load_working_rgb(path):
         new_h = round(w0 / target)
         top = (h0 - new_h) // 2
         img = img.crop((0, top, w0, top + new_h))
-    return np.asarray(img.resize((W, H), Image.BICUBIC), dtype=np.uint8)
+    return np.array(img.resize((W, H), Image.BICUBIC), dtype=np.uint8)
 
 
 def to_working_res(depth_proc, K_proc):
     """Resize depth from DA3's processing resolution to (H, W); rescale K to match."""
     h, w = depth_proc.shape
-    depth = np.asarray(
+    depth = np.array(  # np.array (not asarray): PIL gives a read-only buffer
         Image.fromarray(depth_proc.astype(np.float32)).resize((W, H), Image.BILINEAR),
         dtype=np.float32,
     )
