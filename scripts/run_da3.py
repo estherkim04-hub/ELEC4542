@@ -26,7 +26,7 @@ import os
 import sys
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from dvid.contracts import H, W  # noqa: E402
@@ -39,7 +39,7 @@ MODEL_IDS = {
 
 def load_working_rgb(path):
     """Centre-crop to W:H aspect ratio, resize to (W, H). Returns uint8 RGB."""
-    img = Image.open(path).convert("RGB")
+    img = ImageOps.exif_transpose(Image.open(path)).convert("RGB") 
     w0, h0 = img.size
     target = W / H
     if w0 / h0 > target:  # too wide -> crop width
