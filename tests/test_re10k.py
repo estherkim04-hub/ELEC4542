@@ -52,3 +52,16 @@ def test_rotation_filter(tmp_path):
     idx = [j for j, _, _ in candidate_targets(clip, 0, max_rot_deg=16.0)]
     assert idx == [1, 2, 3, 4, 5]
     assert clip_summary(clip)["direction"] == "lateral"
+
+
+def test_select_sequence_reaches_band():
+    from dvid.re10k import select_sequence
+    from dvid.geometry import camera_path
+    depth = np.full((H, W), 4.0, np.float32)
+    # dataset units = metres / 10, lateral move to d_norm 0.3 over 61 frames
+    poses = np.stack([T.copy() for T in camera_path("lateral", 4.0, 0.3, 61)])
+    poses[:, :3, 3] /= 10.0
+    idx, d = select_sequence(poses, 0, 10.0, depth, 0.1, n_frames=9)
+    assert len(idx) == 9 and idx[0] == 0
+    assert 0.1 <= d[-1] < 0.12 and d[0] == 0.0
+    assert select_sequence(poses, 0, 10.0, depth, 0.5, n_frames=9) is None  # never reached

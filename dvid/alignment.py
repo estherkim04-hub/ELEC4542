@@ -128,3 +128,25 @@ def with_scaled_translation(T, s):
     T2 = T.copy()
     T2[:3, 3] *= s
     return T2
+
+
+def clip_scale(get_frame, poses, K, src_depth, src_idx, target_idx, n_pairs=8):
+    """Clip-level scale from several source-target pairs (see estimate_scale).
+
+    get_frame(i) -> RGB uint8 frame i. target_idx: candidate target indices
+    (e.g. from re10k.candidate_targets). Returns (scale, n_good, per_pair).
+    """
+    target_idx = list(target_idx)
+    if not target_idx:
+        return np.nan, 0, []
+    pick = np.unique(np.linspace(len(target_idx) // 4, len(target_idx) - 1,
+                                 min(n_pairs, len(target_idx))).astype(int))
+    src = get_frame(src_idx)
+    results = []
+    for k in pick:
+        j = target_idx[k]
+        r = estimate_scale(src, get_frame(j), src_depth, K, poses[src_idx], poses[j])
+        r["target"] = int(j)
+        results.append(r)
+    s, n_good = estimate_clip_scale(results)
+    return s, n_good, results

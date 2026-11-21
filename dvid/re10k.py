@@ -110,3 +110,32 @@ def clip_summary(clip, max_rot_deg=15.0):
         direction = "-"
     return {"clip_id": clip.clip_id, "frames": len(clip), "duration_s": round(clip.duration_s, 1),
             "usable_targets": usable, "max_translation": round(reach, 3), "direction": direction}
+
+
+def select_sequence(poses, src_idx, scale, src_depth, d_band, n_frames=25, max_rot_deg=15.0):
+    """Pick frames along the real trajectory for one displacement band.
+
+    Walks forward from src_idx until the aligned normalised displacement first
+    reaches d_band (stopping early if rotation from the source exceeds
+    max_rot_deg), then samples n_frames indices evenly from src_idx to that
+    frame. Returns (indices, d_norms) or None if the band is never reached.
+    """
+    from .geometry import median_depth
+
+    md = median_depth(src_depth)
+    Cs = camera_center(poses[src_idx])
+    end = None
+    for j in range(src_idx + 1, len(poses)):
+        if rotation_angle_deg(poses[src_idx], poses[j]) > max_rot_deg:
+            break
+        d = scale * float(np.linalg.norm(camera_center(poses[j]) - Cs)) / md
+        if d >= d_band:
+            end = j
+            break
+    if end is None or end - src_idx + 1 < n_frames:
+        return None
+    idx = np.unique(np.round(np.linspace(src_idx, end, n_frames)).astype(int))
+    if len(idx) < n_frames:
+        return None
+    d_norms = [scale * float(np.linalg.norm(camera_center(poses[j]) - Cs)) / md for j in idx]
+    return idx, d_norms
