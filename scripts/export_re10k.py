@@ -8,7 +8,9 @@ data/re10k_depth/<id>/depth.npy (from run_da3.py on its source frame):
 
 1. Estimate (or reuse) the clip's dataset-to-metres scale -> data/re10k/<id>/scale.json
 2. For each d_norm band, walk the real trajectory until the camera has moved
-   that far (rotation < --max-rot), and sample --frames frames evenly.
+   that far (rotation < --max-rot), and sample --frames frames evenly. If the
+   band is reached in fewer real frames, fall back to 17, 13 or 9 frames
+   (recorded as n_frames in meta.json).
 3. Render the source frame into each sampled view.
 
 Output per clip and band:  runs/re10k_<id>_d<band>/
@@ -39,21 +41,30 @@ def load_rgb(path):
     return np.array(Image.open(path).convert("RGB"), dtype=np.uint8)
 
 
+def scale_spread(per_pair, min_trans_px=5.0, min_used=30):
+    """Half-range of the well-constrained pair scales, as a fraction of their median."""
+    good = [r["scale"] for r in per_pair
+            if np.isfinite(r["scale"]) and r["trans_px"] >= min_trans_px and r["n_used"] >= min_used]
+    if len(good) < 2:
+        return float("nan"), len(good)
+    return (max(good) - min(good)) / 2 / float(np.median(good)), len(good)
+
+
 def get_scale(clip_dir, frame, poses, K, depth, src, max_rot, recompute=False):
     path = os.path.join(clip_dir, "scale.json")
     if os.path.exists(path) and not recompute:
         with open(path) as f:
             saved = json.load(f)
         if saved.get("src") == src:
-            return saved["scale"]
+            return saved["scale"], saved.get("per_pair", [])
     ts = np.zeros(len(poses), np.int64)
     cands = [j for j, _, _ in candidate_targets(Clip("", "", ts, np.zeros((len(poses), 4)), poses), src, max_rot)]
     s, n_good, per_pair = clip_scale(frame, poses, K, depth, src, cands)
     if not np.isfinite(s):
-        return None
+        return None, per_pair
     with open(path, "w") as f:
         json.dump({"src": src, "scale": s, "pairs_used": n_good, "per_pair": per_pair}, f, indent=1, default=float)
-    return s
+    return s, per_pair
 
 
 def main():
@@ -85,19 +96,27 @@ def main():
         depth = np.load(os.path.join(args.depth_dir, cid, "depth.npy")).astype(np.float32)
         src, K = args.src, Ks[args.src]
 
-        s = get_scale(clip_dir, frame, poses, K, depth, src, args.max_rot, args.recompute_scale)
+        s, per_pair = get_scale(clip_dir, frame, poses, K, depth, src, args.max_rot, args.recompute_scale)
         if s is None:
             print(f"{cid}: scale could not be estimated (too few matches or too little motion), skipping")
             continue
-        print(f"{cid}: scale {s:.4g}")
+        spread, n_pairs = scale_spread(per_pair)
+        flag = "  <-- CHECK: pairs disagree" if np.isfinite(spread) and spread > 0.10 else ""
+        print(f"{cid}: scale {s:.4g} ({n_pairs} pairs, spread +/-{spread:.0%}){flag}")
 
         scene = scene_from_rgbd(frame(src), depth, K)
         T_src_inv = np.linalg.inv(poses[src])
         for band in args.d_norm:
-            sel = select_sequence(poses, src, s, depth, band, args.frames, args.max_rot)
+            sel = None
+            for n in [k for k in (args.frames, 17, 13, 9) if k <= args.frames]:
+                sel = select_sequence(poses, src, s, depth, band, n, args.max_rot)
+                if sel is not None:
+                    break
             if sel is None:
-                print(f"  d{band:g}: camera never moves that far within {args.max_rot} deg "
-                      f"(or too few frames), skipping")
+                if select_sequence(poses, src, s, depth, band, 2, args.max_rot) is None:
+                    print(f"  d{band:g}: camera never moves that far within {args.max_rot:g} deg of rotation, skipping")
+                else:
+                    print(f"  d{band:g}: reached in fewer than 9 frames (camera moves too fast), skipping")
                 continue
             idx, d_norms = sel
             seq_dir = os.path.join(args.out, f"re10k_{cid}_d{band:g}")
@@ -109,11 +128,11 @@ def main():
             for k, j in enumerate(idx):  # copy the extracted JPEG as-is (no re-encoding)
                 shutil.copy(os.path.join(clip_dir, "frames", f"{ts[j]}.jpg"), os.path.join(gt_dir, f"frame_{k:04d}.jpg"))
             with open(os.path.join(seq_dir, "meta.json"), "w") as f:
-                json.dump({"clip_id": cid, "scale": s, "src_index": int(src), "band": band,
+                json.dump({"clip_id": cid, "scale": s, "src_index": int(src), "band": band, "n_frames": len(idx),
                            "frame_indices": [int(j) for j in idx],
                            "timestamps_us": [int(ts[j]) for j in idx],
                            "d_norm": d_norms}, f, indent=1)
-            print(f"  d{band:g}: frames {idx[0]}..{idx[-1]}, final d_norm {d_norms[-1]:.3f}, "
+            print(f"  d{band:g}: {len(idx)} frames ({idx[0]}..{idx[-1]}), final d_norm {d_norms[-1]:.3f}, "
                   f"final holes {timing[-1]['hole_fraction']:.1%} -> {seq_dir}")
 
 
