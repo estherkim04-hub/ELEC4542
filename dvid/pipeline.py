@@ -34,7 +34,7 @@ def run_sequence(scene, poses, condition, seed=0):
 
         if condition == "D_reuse" and holes.any():
             t0 = time.perf_counter()
-            scene = add_to_scene(scene, out, holes, T)
+            scene = add_to_scene(scene, out, holes, T, rendered_depth=depth)
             t["scene_update"] = time.perf_counter() - t0
 
         frames.append({"rgb": out, "hole_mask": holes, "depth": depth,

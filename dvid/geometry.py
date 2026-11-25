@@ -255,17 +255,121 @@ def normalized_displacement(T_src, T_tgt, src_depth):
 
 
 # --------------------------------------------------------------------------- #
-# Scene update (Condition D) — still a stub, see task 5
+# Scene update (Condition D): temporal reuse of inpainted content
 # --------------------------------------------------------------------------- #
-def add_to_scene(scene, completed_rgb, hole_mask, T):
-    """Add the inpainted pixels (hole_mask == True) of `completed_rgb`, seen from
-    pose `T`, to the scene. Returns a NEW Scene; never mutates `scene`.
+_DEPTH_ESTIMATOR = None
 
-    STUB: returns an unchanged copy (real version: DA3 on completed_rgb,
-    ring-based scale/shift alignment, reliability filtering, append).
+
+def set_depth_estimator(fn):
+    """Set the monocular depth model used by add_to_scene (or None for 'fill' mode).
+
+    fn(rgb uint8 (H,W,3)) -> depth float (H,W); any scale/shift, since it is
+    re-aligned to the scene. On Colab: set_depth_estimator(depth_models.da3_estimator()).
+    """
+    global _DEPTH_ESTIMATOR
+    _DEPTH_ESTIMATOR = fn
+
+
+def _propagate(depth, valid, axis, reverse):
+    """Depth of the nearest valid pixel before each pixel along an axis (0 = none)."""
+    d, v = depth, valid
+    if axis == 0:
+        d, v = d.T, v.T
+    if reverse:
+        d, v = d[:, ::-1], v[:, ::-1]
+    n = d.shape[1]
+    idx = np.where(v, np.arange(n)[None, :], -1)
+    idx = np.maximum.accumulate(idx, axis=1)
+    out = np.where(idx >= 0, np.take_along_axis(d, np.maximum(idx, 0), axis=1), 0.0)
+    if reverse:
+        out = out[:, ::-1]
+    return out.T if axis == 0 else out
+
+
+def fill_background_depth(depth, holes):
+    """Depth for hole pixels from their surroundings, assuming they show BACKGROUND
+    (what a moving camera reveals behind an occluder): along each row take the
+    farther of the nearest valid depths to the left and right; rows with no valid
+    pixel on either side fall back to the farther of up/down."""
+    valid = (depth > 0) & ~holes
+    left, right = _propagate(depth, valid, 1, False), _propagate(depth, valid, 1, True)
+    up, down = _propagate(depth, valid, 0, False), _propagate(depth, valid, 0, True)
+    horiz = np.maximum(left, right)
+    out = np.where(horiz > 0, horiz, np.maximum(up, down))
+    return np.where(holes, out, depth).astype(np.float32)
+
+
+def _align_to_ring(est, depth, ring, trim=0.2, iters=2):
+    """Fit depth ~= a * est + b on ring pixels (least squares, dropping the worst
+    `trim` fraction each pass). Returns aligned estimate or None if unreliable."""
+    m = ring & (est > 0) & np.isfinite(est)
+    if m.sum() < 50:
+        return None
+    x, y = est[m].astype(np.float64), depth[m].astype(np.float64)
+    keep = np.ones(len(x), bool)
+    for _ in range(iters + 1):
+        A = np.stack([x[keep], np.ones(keep.sum())], 1)
+        (a, b), *_ = np.linalg.lstsq(A, y[keep], rcond=None)
+        r = np.abs(a * x + b - y)
+        keep = r <= np.quantile(r, 1 - trim)
+    if a <= 0:
+        return None
+    return (a * est + b).astype(np.float32)
+
+
+def add_to_scene(scene, completed_rgb, hole_mask, T, rendered_depth=None,
+                 ring_px=4, edge_thresh=0.1, return_stats=False):
+    """Add the inpainted pixels (hole_mask == True) of `completed_rgb`, seen from
+    pose `T`, to the scene, so later frames re-render them instead of
+    re-inpainting (Condition D). Returns a NEW Scene; never mutates `scene`.
+
+    1. Depth for the hole pixels: the depth model set with set_depth_estimator,
+       aligned (scale + shift) to the rendered depth in a ring around the holes;
+       without a model, fill_background_depth (holes = revealed background).
+    2. Reliability: drop points outside [0.8 x nearest ring depth, 1.25 x farthest
+       ring depth], closer than NEAR, or on depth edges of the new depth map.
+    3. Unproject with scene.K, move to world coordinates, append.
+
+    rendered_depth: render()'s depth for this pose (saves a re-render).
+    return_stats=True also returns a dict (mode, added, rejected, a/b fit).
     """
     assert isinstance(scene, Scene)
     check_rgb(completed_rgb, "completed_rgb")
     check_mask(hole_mask, "hole_mask")
     check_pose(T)
-    return Scene(points=scene.points.copy(), colors=scene.colors.copy(), K=scene.K)
+    stats = {"mode": "none", "holes": int(hole_mask.sum()), "added": 0, "rejected": 0}
+    copy = Scene(points=scene.points.copy(), colors=scene.colors.copy(), K=scene.K)
+    if not hole_mask.any():
+        return (copy, stats) if return_stats else copy
+    if rendered_depth is None:
+        _, _, rendered_depth = render(scene, T, hole_dilate=0)
+    check_depth(rendered_depth, "rendered_depth")
+
+    ring = dilate(hole_mask, ring_px) & ~hole_mask & (rendered_depth > 0)
+    fill = fill_background_depth(rendered_depth, hole_mask)
+    new_depth, stats["mode"] = fill, "fill"
+    if _DEPTH_ESTIMATOR is not None:
+        est = np.asarray(_DEPTH_ESTIMATOR(completed_rgb), dtype=np.float32)
+        assert est.shape == (H, W), f"depth estimator returned {est.shape}, expected {(H, W)}"
+        aligned = _align_to_ring(est, rendered_depth, ring)
+        if aligned is not None:
+            new_depth = np.where(hole_mask, aligned, rendered_depth).astype(np.float32)
+            stats["mode"] = "estimator"
+
+    keep = hole_mask & (new_depth > NEAR) & np.isfinite(new_depth)
+    if ring.any():
+        rd = rendered_depth[ring]
+        keep &= (new_depth >= 0.8 * rd.min()) & (new_depth <= 1.25 * rd.max())
+    keep &= ~(dilate(depth_edges(np.where(keep | ~hole_mask, new_depth, 0).astype(np.float32),
+                                 edge_thresh), 1) & hole_mask)
+    stats["added"] = int(keep.sum())
+    stats["rejected"] = int(hole_mask.sum() - keep.sum())
+    if not keep.any():
+        return (copy, stats) if return_stats else copy
+
+    P_cam, v, u = unproject(np.where(keep, new_depth, 0).astype(np.float32), scene.K)
+    R, t = T[:3, :3], T[:3, 3]
+    P_world = (P_cam - t) @ R  # x_w = R^T (x_c - t)
+    out = Scene(points=np.concatenate([scene.points, P_world.astype(np.float32)]),
+                colors=np.concatenate([scene.colors, completed_rgb[v, u]]), K=scene.K)
+    return (out, stats) if return_stats else out
