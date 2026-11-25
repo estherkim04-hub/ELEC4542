@@ -6,7 +6,8 @@
 
 Input:  <depth-dir>/<name>/{rgb.jpg, depth.npy, K.npy}   (from run_da3.py)
 Output: <out>/photo_<name>_<path>_d<d_norm>/A_warp/seed0/
-            frame_0000.png  hole_0000.png  depth_0000.npy  poses.json  timing.json
+            frame_0000.png  hole_0000.png  border_0000.png  depth_0000.npy  poses.json  timing.json
+            (border = holes outside the source view; disocclusion = hole AND NOT border)
 """
 import argparse
 import json
@@ -18,7 +19,7 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from dvid.geometry import camera_path, median_depth, render, scene_from_rgbd  # noqa: E402
+from dvid.geometry import camera_path, classify_holes, median_depth, render, scene_from_rgbd  # noqa: E402
 
 
 def export_sequence(scene, poses, out_dir):
@@ -27,9 +28,13 @@ def export_sequence(scene, poses, out_dir):
     for i, T in enumerate(poses):
         t0 = time.perf_counter()
         rgb, holes, depth = render(scene, T)
-        timing.append({"render": time.perf_counter() - t0, "hole_fraction": float(holes.mean())})
+        dt = time.perf_counter() - t0
+        border, disocc = classify_holes(holes, depth, scene.K, T)
+        timing.append({"render": dt, "hole_fraction": float(holes.mean()),
+                       "border_fraction": float(border.mean()), "disocclusion_fraction": float(disocc.mean())})
         Image.fromarray(rgb).save(os.path.join(out_dir, f"frame_{i:04d}.png"))
         Image.fromarray(holes.astype(np.uint8) * 255).save(os.path.join(out_dir, f"hole_{i:04d}.png"))
+        Image.fromarray(border.astype(np.uint8) * 255).save(os.path.join(out_dir, f"border_{i:04d}.png"))
         np.save(os.path.join(out_dir, f"depth_{i:04d}.npy"), depth)
     with open(os.path.join(out_dir, "poses.json"), "w") as f:
         json.dump({"K": scene.K.tolist(), "poses": [T.tolist() for T in poses]}, f)

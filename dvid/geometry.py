@@ -373,3 +373,43 @@ def add_to_scene(scene, completed_rgb, hole_mask, T, rendered_depth=None,
     out = Scene(points=np.concatenate([scene.points, P_world.astype(np.float32)]),
                 colors=np.concatenate([scene.colors, completed_rgb[v, u]]), K=scene.K)
     return (out, stats) if return_stats else out
+
+
+# --------------------------------------------------------------------------- #
+# Hole types (RQ1): border (outside the source view) vs disocclusion
+# --------------------------------------------------------------------------- #
+def classify_holes(hole_mask, depth_map, K, T):
+    """Split a render's hole mask into two kinds.
+
+    border: the hole shows content that was OUTSIDE the source camera's view.
+    disocclusion: the content was inside the source view but hidden behind
+    something nearer.
+    Each hole pixel gets a background depth (fill_background_depth), is lifted
+    to 3D from pose T and projected into the source camera (world = source
+    camera frame): landing outside the source image, or behind it, = border.
+    Pixels with no depth information at all count as border.
+
+    Returns (border_mask, disocclusion_mask), both bool (H, W), disjoint, and
+    together equal to hole_mask.
+    """
+    check_mask(hole_mask, "hole_mask")
+    check_depth(depth_map, "depth_map")
+    check_K(K)
+    check_pose(T)
+    border = np.zeros((H, W), bool)
+    if not hole_mask.any():
+        return border, border.copy()
+    fill = fill_background_depth(depth_map, hole_mask)
+    known = hole_mask & (fill > 0)
+    border |= hole_mask & ~known
+    if known.any():
+        P_cam, v, u = unproject(np.where(known, fill, 0).astype(np.float32), K)
+        R, t = T[:3, :3], T[:3, 3]
+        P_src = (P_cam - t) @ R          # target camera -> world (= source camera)
+        z = P_src[:, 2]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            us = K[0, 0] * P_src[:, 0] / z + K[0, 2]
+            vs = K[1, 1] * P_src[:, 1] / z + K[1, 2]
+        outside = (z <= NEAR) | ~(us >= -0.5) | ~(us < W - 0.5) | ~(vs >= -0.5) | ~(vs < H - 0.5)
+        border[v[outside], u[outside]] = True
+    return border, hole_mask & ~border
